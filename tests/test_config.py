@@ -21,9 +21,10 @@ class TestConfigResolver:
 
         try:
             fallbacks = _get_env_var_fallbacks()
-            assert len(fallbacks) == 2, "Should have exactly 2 fallbacks"
-            assert fallbacks[0][0] == "VISUAL", "First fallback should be VISUAL"
-            assert fallbacks[1][0] == "EDITOR", "Second fallback should be EDITOR"
+            assert len(fallbacks) == 3, "Should have exactly 3 fallbacks"
+            assert fallbacks[0][0] == "GITNOTES_EDITOR", "First fallback should be GITNOTES_EDITOR"
+            assert fallbacks[1][0] == "VISUAL", "Second fallback should be VISUAL"
+            assert fallbacks[2][0] == "EDITOR", "Third fallback should be EDITOR"
         finally:
             # Restore
             if original_visual is not None:
