@@ -291,6 +291,80 @@ class TestExternalChangeRecovery:
         assert note_path.read_text() == "original\n"
 
 
+class TestEdgeCases:
+    """Slice 4: Edge Cases — Empty & Deleted Files (ADR-0012, ADR-0013)."""
+
+    def test_restores_empty_file_from_snapshot(self, repo_dir):
+        """When editor produces an empty file, restore option works."""
+        from src.gitnotes.editor import edit_note
+
+        subprocess.run(
+            ["git", "config", "user.email", "test@gitnotes.dev"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "GitNotes Test"],
+            check=True, capture_output=True,
+        )
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original content\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
+
+        empty_script = repo_dir / "empty_editor.sh"
+        empty_script.write_text("#!/bin/sh\n: > \"$1\"\n")
+        empty_script.chmod(0o755)
+
+        calls = []
+        def on_empty(name, diff):
+            calls.append(("empty", name))
+            return "restore"
+
+        result = edit_note(
+            "test-note.md", str(empty_script),
+            on_empty=on_empty,
+        )
+        assert result is False
+        assert len(calls) == 1
+        assert note_path.read_text() == "original content\n"
+
+    def test_restores_deleted_file_from_snapshot(self, repo_dir):
+        """When file is deleted after edit, restore option works."""
+        from src.gitnotes.editor import edit_note
+
+        subprocess.run(
+            ["git", "config", "user.email", "test@gitnotes.dev"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "GitNotes Test"],
+            check=True, capture_output=True,
+        )
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original content\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
+
+        delete_script = repo_dir / "delete_editor.sh"
+        delete_script.write_text("#!/bin/sh\nrm \"$1\"\n")
+        delete_script.chmod(0o755)
+
+        calls = []
+        def on_deleted(name):
+            calls.append(("deleted", name))
+            return "restore"
+
+        result = edit_note(
+            "test-note.md", str(delete_script),
+            on_deleted=on_deleted,
+        )
+        assert result is False
+        assert len(calls) == 1
+        assert note_path.read_text() == "original content\n"
+
+
 class TestSessionLocking:
     """Slice 2a: Session Locking Protocol (ADR-0002)."""
 

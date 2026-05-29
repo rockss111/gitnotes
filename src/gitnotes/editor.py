@@ -76,25 +76,32 @@ def edit_note(
     name: str,
     editor_cmd: str,
     on_external_change: callable = None,
+    on_empty: callable = None,
+    on_deleted: callable = None,
     _after_snapshot: callable = None,
 ) -> bool:
     """
-    Full editing session lifecycle with external change detection.
+    Full editing session lifecycle with external change detection and edge cases.
 
     Per ADR-0005:
     1. Acquire session lock
     2. Create pre-edit snapshot
     3. Check for external changes (pre-edit)
     4. Spawn editor and wait
-    5. Validate post-edit file
-    6. Compare hashes, show diff if changed
-    7. Commit if user accepts, or revert
+    5. Handle empty/deleted file edge cases
+    6. Validate post-edit file
+    7. Compare hashes, show diff if changed
+    8. Commit if user accepts, or revert
 
     Args:
         name: The note name (e.g., "my-note.md")
         editor_cmd: The editor command to spawn
         on_external_change: Callback invoked when external change detected.
             Receives (name, diff). Returns "accept", "retry", or "abort".
+        on_empty: Callback when file is empty after edit.
+            Receives (name, diff). Returns "keep" or "restore".
+        on_deleted: Callback when file is missing after edit.
+            Receives (name). Returns "restore" or "skip".
 
     Returns:
         True if changes were committed, False otherwise
@@ -124,7 +131,21 @@ def edit_note(
 
         spawn_editor(editor_cmd, str(Path.cwd() / name))
 
-        if not validate_note(str(Path.cwd() / name)):
+        note_path = Path.cwd() / name
+        if not note_path.exists():
+            if on_deleted:
+                action = on_deleted(name)
+                if action == "restore":
+                    _restore_snapshot(name)
+            return False
+        elif note_path.stat().st_size == 0:
+            if on_empty:
+                diff = get_diff(name)
+                action = on_empty(name, diff)
+                if action == "restore":
+                    _restore_snapshot(name)
+            return False
+        elif not validate_note(str(note_path)):
             return False
 
         if not snapshot_changed(name):
