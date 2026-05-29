@@ -365,6 +365,94 @@ class TestEdgeCases:
         assert note_path.read_text() == "original content\n"
 
 
+class TestExport:
+    """Slice 5: Pandoc Export (ADR-0008)."""
+
+    def test_preflight_returns_false_when_pandoc_missing(self, repo_dir):
+        """Pre-flight check returns False when pandoc not in PATH."""
+        from src.gitnotes.export import check_pandoc, export_note
+
+        assert not check_pandoc("nonexistent-pandoc")
+
+    def test_preflight_accepts_custom_pandoc_path(self, repo_dir):
+        """Pre-flight check works with a custom pandoc path."""
+        from src.gitnotes.export import check_pandoc
+
+        assert check_pandoc("true")
+
+    def test_export_returns_true_on_success(self, repo_dir):
+        """Export returns True when conversion succeeds."""
+        from src.gitnotes.export import export_note
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("# Hello\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add"], check=True, capture_output=True)
+
+        assert export_note("test-note.md", "true") is True
+
+    def test_export_returns_false_on_failure(self, repo_dir):
+        """Export returns False when conversion fails."""
+        from src.gitnotes.export import export_note
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("# Hello\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add"], check=True, capture_output=True)
+
+        assert export_note("test-note.md", "false") is False
+
+    def test_export_skips_when_pandoc_missing(self, repo_dir):
+        """Export returns False when pandoc is unavailable."""
+        from src.gitnotes.export import export_note
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("# Hello\n")
+
+        assert export_note("test-note.md", "nonexistent-pandoc") is False
+
+
+class TestSearch:
+    """Slice 5: Search Command (ADR-0009)."""
+
+    def test_search_returns_empty_when_no_matches(self, repo_dir):
+        """Search with no matches returns empty string."""
+        from src.gitnotes.search import search_notes
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("hello world\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add note"], check=True, capture_output=True)
+
+        results = search_notes("nonexistent")
+        assert results == ""
+
+    def test_search_finds_matching_content(self, repo_dir):
+        """Search returns matches when content exists."""
+        from src.gitnotes.search import search_notes
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("hello world\nfoo bar\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add note"], check=True, capture_output=True)
+
+        results = search_notes("hello")
+        assert "test-note.md" in results
+        assert "hello" in results
+
+    def test_search_case_insensitive(self, repo_dir):
+        """Search is case-insensitive."""
+        from src.gitnotes.search import search_notes
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("HELLO world\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add note"], check=True, capture_output=True)
+
+        results = search_notes("hello")
+        assert "HELLO" in results
+
+
 class TestSessionLocking:
     """Slice 2a: Session Locking Protocol (ADR-0002)."""
 
