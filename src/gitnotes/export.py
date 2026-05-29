@@ -28,7 +28,7 @@ def check_pandoc(pandoc_path: str = "pandoc") -> bool:
 
 
 def export_note(
-    note_path: Path, *, pandoc_path: str = "pandoc"
+    note_path: Path, *, pandoc_path: str = "pandoc", fmt: str = "html"
 ) -> ExportResult:
     if not check_pandoc(pandoc_path):
         return ExportResult(
@@ -38,7 +38,7 @@ def export_note(
             output_path=None,
         )
 
-    output_path = note_path.with_suffix(".html")
+    output_path = note_path.with_suffix(f".{fmt}")
     timeouts = [30, 60]
     last_result: subprocess.CompletedProcess | None = None
     last_error = ""

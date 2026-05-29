@@ -99,14 +99,14 @@ def _parse_git_grep_output(raw: str) -> tuple[SearchMatch, ...]:
     )
 
 
-def search_notes(query: str) -> SearchResult:
+def search_notes(query: str, context: int = 3) -> SearchResult:
     cmd = [
         "git",
         "grep",
         "-i",
         "-n",
         "-C",
-        "3",
+        str(context),
         "--heading",
         "--break",
         "-e",

@@ -221,7 +221,7 @@ class TestSearchCli:
             raw="test.md:1:hello world\n",
             exit_code=0,
         )
-        monkeypatch.setattr("src.gitnotes.cli.search_notes", lambda q: mock_result)
+        monkeypatch.setattr("src.gitnotes.cli.search_notes", lambda q, **kw: mock_result)
 
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as _:
@@ -231,7 +231,7 @@ class TestSearchCli:
 
     def test_search_no_results(self, tmp_path, monkeypatch):
         mock_result = SearchResult(matches=(), raw="", exit_code=1)
-        monkeypatch.setattr("src.gitnotes.cli.search_notes", lambda q: mock_result)
+        monkeypatch.setattr("src.gitnotes.cli.search_notes", lambda q, **kw: mock_result)
 
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as _:
@@ -240,8 +240,9 @@ class TestSearchCli:
 
     def test_search_context_flag(self, tmp_path, monkeypatch):
         captured = {}
-        def track_search(query):
+        def track_search(query, context=3):
             captured["query"] = query
+            captured["context"] = context
             return SearchResult(matches=(), raw="", exit_code=1)
         monkeypatch.setattr("src.gitnotes.cli.search_notes", track_search)
 
@@ -249,6 +250,7 @@ class TestSearchCli:
         with runner.isolated_filesystem(temp_dir=tmp_path) as _:
             runner.invoke(main, ["search", "--context", "5", "hello"])
             assert captured["query"] == "hello"
+            assert captured["context"] == 5
 
     def test_search_json_output(self, tmp_path, monkeypatch):
         mock_result = SearchResult(
@@ -256,7 +258,7 @@ class TestSearchCli:
             raw="test.md:1:hello world\n",
             exit_code=0,
         )
-        monkeypatch.setattr("src.gitnotes.cli.search_notes", lambda q: mock_result)
+        monkeypatch.setattr("src.gitnotes.cli.search_notes", lambda q, **kw: mock_result)
 
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as _:
@@ -275,7 +277,7 @@ class TestExportCli:
             success=True, exit_code=0, stderr="",
             output_path=Path("test-note.html"),
         )
-        monkeypatch.setattr("src.gitnotes.cli.export_note", lambda p: mock_result)
+        monkeypatch.setattr("src.gitnotes.cli.export_note", lambda p, **kw: mock_result)
 
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as _:
@@ -288,7 +290,7 @@ class TestExportCli:
             success=False, exit_code=1, stderr="pandoc error",
             output_path=Path("test-note.html"),
         )
-        monkeypatch.setattr("src.gitnotes.cli.export_note", lambda p: mock_result)
+        monkeypatch.setattr("src.gitnotes.cli.export_note", lambda p, **kw: mock_result)
 
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as _:
@@ -298,8 +300,9 @@ class TestExportCli:
 
     def test_export_format_flag(self, tmp_path, monkeypatch):
         captured = {}
-        def track_export(note_path):
+        def track_export(note_path, *, fmt="html"):
             captured["note_path"] = note_path
+            captured["fmt"] = fmt
             return ExportResult(
                 success=True, exit_code=0, stderr="",
                 output_path=Path("test-note.pdf"),
@@ -311,14 +314,14 @@ class TestExportCli:
             Path("test-note.md").write_text("# Hello\n")
             result = runner.invoke(main, ["export", "--format", "pdf", "test-note"])
             assert result.exit_code == 0
-            assert str(captured["note_path"]).endswith("test-note.md")
+            assert captured["fmt"] == "pdf"
 
     def test_export_pandoc_not_found(self, tmp_path, monkeypatch):
         mock_result = ExportResult(
             success=False, exit_code=None, stderr="pandoc not found",
             output_path=None,
         )
-        monkeypatch.setattr("src.gitnotes.cli.export_note", lambda p: mock_result)
+        monkeypatch.setattr("src.gitnotes.cli.export_note", lambda p, **kw: mock_result)
 
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as _:

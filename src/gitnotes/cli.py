@@ -87,7 +87,7 @@ def edit(name, editor):
 @click.option("--context", default=3, type=int, help="Lines of context")
 @click.option("--json", "json_output", is_flag=True, default=False)
 def search(query, context, json_output):
-    result = search_notes(query)
+    result = search_notes(query, context=context)
 
     if json_output:
         click.echo(
@@ -121,7 +121,7 @@ def export(name, format):
     if not note_path.is_file():
         raise ClickExit(code=1)
 
-    result = export_note(note_path)
+    result = export_note(note_path, fmt=format)
 
     if not result.success:
         if result.exit_code is None:
