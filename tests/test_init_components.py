@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from src.gitnotes.session import SessionPaths
+
 
 class TestInitComponents:
     """Unit tests: Isolated initialization component testing."""
@@ -53,7 +55,7 @@ class TestInitComponents:
 
             assert (repo_path / ".gitnotes").is_dir()
             assert (repo_path / ".gitnotes" / "config").exists()
-            assert (repo_path / ".gitnotes" / "sessions").is_dir()
+            assert SessionPaths.base_dir(repo_path).is_dir()
         finally:
             os.chdir(saved_cwd)
 
@@ -106,7 +108,7 @@ class TestInitComponents:
             assert (repo_path / ".git").is_dir(), ".git/ should exist"
             assert (repo_path / ".gitnotes" / "config").exists(), \
                 ".gitnotes/config should exist"
-            assert (repo_path / ".gitnotes" / "sessions").is_dir(), \
+            assert SessionPaths.base_dir(repo_path).is_dir(), \
                 ".gitnotes/sessions/ should exist"
             attrs = repo_path / ".gitattributes"
             assert attrs.exists()

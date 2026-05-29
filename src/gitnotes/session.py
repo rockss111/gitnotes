@@ -16,7 +16,28 @@ import fcntl
 import hashlib
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class SessionPaths:
+    dir: Path
+    lock: Path
+    snapshot: Path
+
+    @classmethod
+    def for_note(cls, repo_path: Path, name: str) -> "SessionPaths":
+        d = cls.base_dir(repo_path)
+        return cls(
+            dir=d,
+            lock=d / f"{name}.lock",
+            snapshot=d / f"{name}.pre-edit",
+        )
+
+    @staticmethod
+    def base_dir(repo_path: Path) -> Path:
+        return repo_path / ".gitnotes" / "sessions"
 
 
 class EditResult(enum.Enum):
@@ -32,9 +53,7 @@ class Session:
         self._name = name
         self._repo_path = repo_path or Path.cwd()
         self._note_path = self._repo_path / name
-        self._sessions_dir = self._repo_path / ".gitnotes" / "sessions"
-        self._lock_path = self._sessions_dir / f"{name}.lock"
-        self._snapshot_path = self._sessions_dir / f"{name}.pre-edit"
+        self._paths = SessionPaths.for_note(self._repo_path, name)
         self._lock_fd: int | None = None
         self._pre_edit_hash: str | None = None
 
@@ -64,10 +83,10 @@ class Session:
         return EditResult.CHANGED
 
     def diff(self) -> str:
-        if not self._snapshot_path.exists():
+        if not self._paths.snapshot.exists():
             return ""
 
-        before = self._snapshot_path.read_text(encoding="utf-8")
+        before = self._paths.snapshot.read_text(encoding="utf-8")
         after = self._note_path.read_text(encoding="utf-8")
 
         if before == after:
@@ -96,8 +115,8 @@ class Session:
         return True
 
     def restore(self) -> None:
-        if self._snapshot_path.exists():
-            self._note_path.write_bytes(self._snapshot_path.read_bytes())
+        if self._paths.snapshot.exists():
+            self._note_path.write_bytes(self._paths.snapshot.read_bytes())
 
     def close(self) -> None:
         self._release_lock()
@@ -111,8 +130,8 @@ class Session:
     # ---- Private helpers ----
 
     def _acquire_lock(self) -> None:
-        self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR)
+        self._paths.dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self._paths.lock), os.O_CREAT | os.O_RDWR)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -129,20 +148,20 @@ class Session:
             os.close(self._lock_fd)
             self._lock_fd = None
 
-        if self._lock_path.exists():
+        if self._paths.lock.exists():
             try:
-                self._lock_path.unlink()
+                self._paths.lock.unlink()
             except OSError:
                 pass
 
     def _create_snapshot(self) -> None:
         content = self._note_path.read_bytes()
-        self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        self._snapshot_path.write_bytes(content)
+        self._paths.dir.mkdir(parents=True, exist_ok=True)
+        self._paths.snapshot.write_bytes(content)
         self._pre_edit_hash = hashlib.sha256(content).hexdigest()
 
     def _has_changed(self) -> bool:
-        if not self._snapshot_path.exists():
+        if not self._paths.snapshot.exists():
             return True
         return self._hash_file(self._note_path) != self._pre_edit_hash
 

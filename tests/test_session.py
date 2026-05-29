@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from src.gitnotes.session import SessionPaths
 
 
 @pytest.fixture
@@ -54,12 +55,11 @@ class TestSessionInit:
 
         session = Session("test-note.md", repo_dir)
 
-        snapshot_path = repo_dir / ".gitnotes" / "sessions" / "test-note.md.pre-edit"
-        lock_path = repo_dir / ".gitnotes" / "sessions" / "test-note.md.lock"
+        p = SessionPaths.for_note(repo_dir, "test-note.md")
 
-        assert snapshot_path.exists()
-        assert snapshot_path.read_bytes() == content
-        assert lock_path.exists()
+        assert p.snapshot.exists()
+        assert p.snapshot.read_bytes() == content
+        assert p.lock.exists()
 
         session.close()
 

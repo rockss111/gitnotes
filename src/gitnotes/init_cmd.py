@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .session import SessionPaths
+
 
 def _ensure_git_initialized(repo_path: Path) -> None:
     """Run git init if not already initialized."""
@@ -49,7 +51,7 @@ def _create_gitnotes_structure(repo_path: Path) -> None:
     if not config_file.exists():
         config_file.write_text(json.dumps({"editor": ""}))
     
-    sessions_dir = gitnotes_dir / "sessions"
+    sessions_dir = SessionPaths.base_dir(repo_path)
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
 

@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from src.gitnotes.session import SessionPaths
 
 
 def _ensure_global_git_config() -> None:
@@ -68,7 +69,7 @@ class TestInitRepository:
     def test_creates_sessions_directory(self, repo_dir):
         from src.gitnotes.init_cmd import init_repository
         init_repository()
-        assert (repo_dir / ".gitnotes" / "sessions").is_dir()
+        assert SessionPaths.base_dir(repo_dir).is_dir()
 
     # ── FC-01.4: Writes .gitattributes with *.md text eol=lf ──
 
