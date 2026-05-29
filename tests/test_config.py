@@ -6,6 +6,7 @@ config resolution, and lock management.
 """
 
 import os
+import subprocess
 from pathlib import Path
 
 
