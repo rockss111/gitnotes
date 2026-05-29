@@ -1,8 +1,13 @@
 """
 Tests for Slice 2a: Session Snapshot Protocol & Locking.
+Tests for Slice 2b: Editor Spawn, Validation & Commit.
+Tests for Slice 3: External Change Recovery.
 
 Per ADR-0001 (Snapshot Protocol): SHA256 hash + pre-edit snapshot file.
 Per ADR-0002 (Session Locking): flock-based advisory locking.
+Per ADR-0003 (Post-Editor Validation): exists, non-empty, UTF-8.
+Per ADR-0004 (Change Detection): unified diff via Python difflib.
+Per ADR-0006 (Git Commit): git add + git commit with meaningful message.
 """
 
 import hashlib
@@ -62,6 +67,141 @@ class TestSnapshotProtocol:
 
         assert snapshot_changed("test-note.md"), \
             "Should report change after modification"
+
+
+class TestPostEditValidation:
+    """Slice 2b, second behavior: post-edit file validation (ADR-0003)."""
+
+    def test_rejects_nonexistent_file(self, repo_dir):
+        """Non-existent file should fail validation."""
+        from src.gitnotes.editor import validate_note
+
+        missing = repo_dir / "does-not-exist.md"
+        assert not validate_note(str(missing))
+
+    def test_rejects_empty_file(self, repo_dir):
+        """Empty file should fail validation."""
+        from src.gitnotes.editor import validate_note
+
+        empty = repo_dir / "empty.md"
+        empty.write_text("")
+        assert not validate_note(str(empty))
+
+    def test_accepts_valid_file(self, repo_dir):
+        """Valid, non-empty, UTF-8 file should pass validation."""
+        from src.gitnotes.editor import validate_note
+
+        valid = repo_dir / "valid.md"
+        valid.write_text("# Hello\n\nThis is valid.\n")
+        assert validate_note(str(valid))
+
+
+class TestDiffDisplay:
+    """Slice 2b, third behavior: unified diff display (ADR-0004)."""
+
+    def test_returns_unified_diff_when_content_changed(self, repo_dir):
+        """Diff between snapshot and modified note shows changes."""
+        from src.gitnotes.snapshot import create_snapshot
+        from src.gitnotes.editor import get_diff
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("line one\nline two\nline three\n")
+        create_snapshot("test-note.md")
+
+        note_path.write_text("line one\nline two modified\nline three\n")
+
+        diff = get_diff("test-note.md")
+        assert isinstance(diff, str)
+        assert len(diff) > 0
+        assert "-line two" in diff
+        assert "+line two modified" in diff
+
+    def test_returns_empty_string_when_unchanged(self, repo_dir):
+        """No changes between snapshot and file should yield empty diff."""
+        from src.gitnotes.snapshot import create_snapshot
+        from src.gitnotes.editor import get_diff
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("fixed content\n")
+        create_snapshot("test-note.md")
+
+        diff = get_diff("test-note.md")
+        assert diff == ""
+
+
+class TestGitCommit:
+    """Slice 2b, fourth behavior: git commit integration (ADR-0006)."""
+
+    def test_commits_changed_note_with_edit_message(self, repo_dir):
+        """Commit a changed note with 'edit:' prefix message."""
+        from src.gitnotes.editor import commit_note
+
+        subprocess.run(
+            ["git", "config", "user.email", "test@gitnotes.dev"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "GitNotes Test"],
+            check=True, capture_output=True,
+        )
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("initial\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
+
+        note_path.write_text("modified\n")
+
+        commit_note("test-note.md")
+
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-1"],
+            capture_output=True, text=True, check=True,
+        )
+        assert "edit:" in result.stdout
+
+    def test_does_not_commit_when_file_unchanged(self, repo_dir):
+        """Skip commit when snapshot shows no change after edit."""
+        from src.gitnotes.editor import commit_note
+        from src.gitnotes.snapshot import create_snapshot
+
+        subprocess.run(
+            ["git", "config", "user.email", "test@gitnotes.dev"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "GitNotes Test"],
+            check=True, capture_output=True,
+        )
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("same\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
+
+        create_snapshot("test-note.md")
+        commit_note("test-note.md")
+
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-1"],
+            capture_output=True, text=True, check=True,
+        )
+        assert "initial" in result.stdout
+        assert "edit:" not in result.stdout
+
+
+class TestEditorSpawn:
+    """Slice 2b, first behavior: spawn editor and wait for exit."""
+
+    def test_spawns_true_editor_and_returns_zero(self, repo_dir):
+        """Spawn 'true' as mock editor; it exits 0 immediately."""
+        from src.gitnotes.editor import spawn_editor
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("content")
+
+        exit_code = spawn_editor("true", str(note_path))
+        assert exit_code == 0
 
 
 class TestSessionLocking:
