@@ -8,7 +8,7 @@ Covers:
 - diff() display
 - commit() integration
 - Lock contention and release
-- Export and Search (unchanged from previous)
+ - Export and Search (deepened with structured returns)
 """
 
 import hashlib
@@ -345,7 +345,7 @@ class TestExport:
 
         assert check_pandoc("true")
 
-    def test_export_returns_true_on_success(self, repo_dir):
+    def test_export_returns_success(self, repo_dir):
         from src.gitnotes.export import export_note
 
         note_path = repo_dir / "test-note.md"
@@ -353,9 +353,12 @@ class TestExport:
         subprocess.run(["git", "add", "."], check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add"], check=True, capture_output=True)
 
-        assert export_note("test-note.md", "true") is True
+        result = export_note(Path("test-note.md"), pandoc_path="true")
+        assert result.success
+        assert result.exit_code == 0
+        assert result.output_path == Path("test-note.html")
 
-    def test_export_returns_false_on_failure(self, repo_dir):
+    def test_export_returns_failure(self, repo_dir):
         from src.gitnotes.export import export_note
 
         note_path = repo_dir / "test-note.md"
@@ -363,7 +366,9 @@ class TestExport:
         subprocess.run(["git", "add", "."], check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add"], check=True, capture_output=True)
 
-        assert export_note("test-note.md", "false") is False
+        result = export_note(Path("test-note.md"), pandoc_path="false")
+        assert not result.success
+        assert result.exit_code == 1
 
     def test_export_skips_when_pandoc_missing(self, repo_dir):
         from src.gitnotes.export import export_note
@@ -371,7 +376,10 @@ class TestExport:
         note_path = repo_dir / "test-note.md"
         note_path.write_text("# Hello\n")
 
-        assert export_note("test-note.md", "nonexistent-pandoc") is False
+        result = export_note(Path("test-note.md"), pandoc_path="nonexistent-pandoc")
+        assert not result.success
+        assert result.exit_code is None
+        assert result.output_path is None
 
 
 class TestSearch:
@@ -385,8 +393,10 @@ class TestSearch:
         subprocess.run(["git", "add", "."], check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add note"], check=True, capture_output=True)
 
-        results = search_notes("nonexistent")
-        assert results == ""
+        result = search_notes("nonexistent")
+        assert len(result.matches) == 0
+        assert result.raw == ""
+        assert result.exit_code == 1
 
     def test_search_finds_matching_content(self, repo_dir):
         from src.gitnotes.search import search_notes
@@ -396,9 +406,12 @@ class TestSearch:
         subprocess.run(["git", "add", "."], check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add note"], check=True, capture_output=True)
 
-        results = search_notes("hello")
-        assert "test-note.md" in results
-        assert "hello" in results
+        result = search_notes("hello")
+        assert len(result.matches) > 0
+        assert result.matches[0].line == 1
+        assert "hello" in result.matches[0].content
+        assert result.matches[0].file == "test-note.md"
+        assert result.exit_code == 0
 
     def test_search_case_insensitive(self, repo_dir):
         from src.gitnotes.search import search_notes
@@ -408,5 +421,6 @@ class TestSearch:
         subprocess.run(["git", "add", "."], check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add note"], check=True, capture_output=True)
 
-        results = search_notes("hello")
-        assert "HELLO" in results
+        result = search_notes("hello")
+        assert len(result.matches) > 0
+        assert result.matches[0].content == "HELLO world"
