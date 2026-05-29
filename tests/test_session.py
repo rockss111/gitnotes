@@ -1,13 +1,14 @@
 """
-Tests for Slice 2a: Session Snapshot Protocol & Locking.
-Tests for Slice 2b: Editor Spawn, Validation & Commit.
-Tests for Slice 3: External Change Recovery.
+Tests for the deepened Session module.
 
-Per ADR-0001 (Snapshot Protocol): SHA256 hash + pre-edit snapshot file.
-Per ADR-0002 (Session Locking): flock-based advisory locking.
-Per ADR-0003 (Post-Editor Validation): exists, non-empty, UTF-8.
-Per ADR-0004 (Change Detection): unified diff via Python difflib.
-Per ADR-0006 (Git Commit): git add + git commit with meaningful message.
+Covers:
+- Session init: snapshot creation, lock acquisition
+- check_external_change / restore
+- edit() lifecycle: UNCHANGED, CHANGED, EMPTY, DELETED, INVALID
+- diff() display
+- commit() integration
+- Lock contention and release
+- Export and Search (unchanged from previous)
 """
 
 import hashlib
@@ -30,129 +31,202 @@ def repo_dir():
     os.chdir(saved_cwd)
 
 
-class TestSnapshotProtocol:
-    """Slice 2a, first behavior: pre-edit snapshot via SHA256."""
+def _config_git_user(repo_dir):
+    subprocess.run(
+        ["git", "config", "user.email", "test@gitnotes.dev"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "GitNotes Test"],
+        check=True, capture_output=True,
+    )
 
-    def test_creates_snapshot_file_with_content_and_returns_hash(self, repo_dir):
-        """Create snapshot of a note, verify .pre-edit file and hash."""
-        from src.gitnotes.snapshot import create_snapshot
+
+class TestSessionInit:
+    """Session construction: lock acquire + snapshot creation."""
+
+    def test_creates_snapshot_and_lock_files(self, repo_dir):
+        from src.gitnotes.session import Session
 
         content = b"# Hello\n\nTest note.\n"
         note_path = repo_dir / "test-note.md"
         note_path.write_bytes(content)
 
-        result = create_snapshot("test-note.md")
+        session = Session("test-note.md", repo_dir)
 
-        snapshot_path = (
-            repo_dir / ".gitnotes" / "sessions" / "test-note.md.pre-edit"
-        )
+        snapshot_path = repo_dir / ".gitnotes" / "sessions" / "test-note.md.pre-edit"
+        lock_path = repo_dir / ".gitnotes" / "sessions" / "test-note.md.lock"
+
         assert snapshot_path.exists()
         assert snapshot_path.read_bytes() == content
+        assert lock_path.exists()
 
-        assert result == hashlib.sha256(content).hexdigest()
+        session.close()
 
-    def test_detects_when_note_has_changed(self, repo_dir):
-        """snapshot_changed returns True when content differs from snapshot."""
-        from src.gitnotes.snapshot import create_snapshot, snapshot_changed
+    def test_snapshot_stores_pre_edit_hash(self, repo_dir):
+        from src.gitnotes.session import Session
+
+        content = b"original content\n"
+        note_path = repo_dir / "test-note.md"
+        note_path.write_bytes(content)
+
+        session = Session("test-note.md", repo_dir)
+        expected_hash = hashlib.sha256(content).hexdigest()
+        assert session._pre_edit_hash == expected_hash
+
+        session.close()
+
+
+class TestExternalChange:
+    """check_external_change and restore."""
+
+    def test_detects_external_change(self, repo_dir):
+        from src.gitnotes.session import Session
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original\n")
+
+        with Session("test-note.md", repo_dir) as s:
+            assert not s.check_external_change()
+            note_path.write_text("externally modified\n")
+            assert s.check_external_change()
+
+    def test_restore_reverts_external_change(self, repo_dir):
+        from src.gitnotes.session import Session
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original\n")
+
+        with Session("test-note.md", repo_dir) as s:
+            note_path.write_text("externally modified\n")
+            s.restore()
+            assert note_path.read_text() == "original\n"
+
+
+class TestSessionEdit:
+    """edit() lifecycle: every EditResult path."""
+
+    def test_unchanged_with_true_editor(self, repo_dir):
+        from src.gitnotes.session import Session, EditResult
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("content\n")
+
+        with Session("test-note.md", repo_dir) as s:
+            result = s.edit("true")
+            assert result == EditResult.UNCHANGED
+
+    def test_changed_with_modifying_script(self, repo_dir):
+        from src.gitnotes.session import Session, EditResult
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original\n")
+
+        modify_script = repo_dir / "modify_editor.sh"
+        modify_script.write_text("#!/bin/sh\necho 'modified' > \"$1\"\n")
+        modify_script.chmod(0o755)
+
+        with Session("test-note.md", repo_dir) as s:
+            result = s.edit(str(modify_script))
+            assert result == EditResult.CHANGED
+
+    def test_empty_returns_empty(self, repo_dir):
+        from src.gitnotes.session import Session, EditResult
 
         note_path = repo_dir / "test-note.md"
         note_path.write_text("original content\n")
 
-        create_snapshot("test-note.md")
+        empty_script = repo_dir / "empty_editor.sh"
+        empty_script.write_text("#!/bin/sh\n: > \"$1\"\n")
+        empty_script.chmod(0o755)
 
-        assert not snapshot_changed("test-note.md"), \
-            "Should report no change before modification"
+        with Session("test-note.md", repo_dir) as s:
+            result = s.edit(str(empty_script))
+            assert result == EditResult.EMPTY
 
-        note_path.write_text("modified content\n")
+    def test_deleted_returns_deleted(self, repo_dir):
+        from src.gitnotes.session import Session, EditResult
 
-        assert snapshot_changed("test-note.md"), \
-            "Should report change after modification"
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original content\n")
 
+        delete_script = repo_dir / "delete_editor.sh"
+        delete_script.write_text("#!/bin/sh\nrm \"$1\"\n")
+        delete_script.chmod(0o755)
 
-class TestPostEditValidation:
-    """Slice 2b, second behavior: post-edit file validation (ADR-0003)."""
+        with Session("test-note.md", repo_dir) as s:
+            result = s.edit(str(delete_script))
+            assert result == EditResult.DELETED
 
-    def test_rejects_nonexistent_file(self, repo_dir):
-        """Non-existent file should fail validation."""
-        from src.gitnotes.editor import validate_note
+    def test_invalid_utf8_returns_invalid(self, repo_dir):
+        from src.gitnotes.session import Session, EditResult
 
-        missing = repo_dir / "does-not-exist.md"
-        assert not validate_note(str(missing))
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original\n")
 
-    def test_rejects_empty_file(self, repo_dir):
-        """Empty file should fail validation."""
-        from src.gitnotes.editor import validate_note
+        bad_utf8_script = repo_dir / "bad_utf8_editor.sh"
+        bad_utf8_script.write_text("#!/bin/sh\nprintf '\\xff\\xfe' > \"$1\"\n")
+        bad_utf8_script.chmod(0o755)
 
-        empty = repo_dir / "empty.md"
-        empty.write_text("")
-        assert not validate_note(str(empty))
-
-    def test_accepts_valid_file(self, repo_dir):
-        """Valid, non-empty, UTF-8 file should pass validation."""
-        from src.gitnotes.editor import validate_note
-
-        valid = repo_dir / "valid.md"
-        valid.write_text("# Hello\n\nThis is valid.\n")
-        assert validate_note(str(valid))
+        with Session("test-note.md", repo_dir) as s:
+            result = s.edit(str(bad_utf8_script))
+            assert result == EditResult.INVALID
 
 
 class TestDiffDisplay:
-    """Slice 2b, third behavior: unified diff display (ADR-0004)."""
+    """diff() — unified diff output (ADR-0004)."""
 
     def test_returns_unified_diff_when_content_changed(self, repo_dir):
-        """Diff between snapshot and modified note shows changes."""
-        from src.gitnotes.snapshot import create_snapshot
-        from src.gitnotes.editor import get_diff
+        from src.gitnotes.session import Session
 
         note_path = repo_dir / "test-note.md"
         note_path.write_text("line one\nline two\nline three\n")
-        create_snapshot("test-note.md")
 
-        note_path.write_text("line one\nline two modified\nline three\n")
+        modify_script = repo_dir / "modify_editor.sh"
+        modify_script.write_text(
+            "#!/bin/sh\ncat > \"$1\" << 'EOF'\nline one\nline two modified\nline three\nEOF\n"
+        )
+        modify_script.chmod(0o755)
 
-        diff = get_diff("test-note.md")
-        assert isinstance(diff, str)
-        assert len(diff) > 0
-        assert "-line two" in diff
-        assert "+line two modified" in diff
+        with Session("test-note.md", repo_dir) as s:
+            s.edit(str(modify_script))
+            diff = s.diff()
+            assert isinstance(diff, str)
+            assert len(diff) > 0
+            assert "-line two" in diff or "-line two" in diff
+            assert "+line two modified" in diff
 
-    def test_returns_empty_string_when_unchanged(self, repo_dir):
-        """No changes between snapshot and file should yield empty diff."""
-        from src.gitnotes.snapshot import create_snapshot
-        from src.gitnotes.editor import get_diff
+    def test_returns_empty_when_unchanged(self, repo_dir):
+        from src.gitnotes.session import Session
 
         note_path = repo_dir / "test-note.md"
         note_path.write_text("fixed content\n")
-        create_snapshot("test-note.md")
 
-        diff = get_diff("test-note.md")
-        assert diff == ""
+        with Session("test-note.md", repo_dir) as s:
+            s.edit("true")
+            assert s.diff() == ""
 
 
 class TestGitCommit:
-    """Slice 2b, fourth behavior: git commit integration (ADR-0006)."""
+    """commit() — git integration (ADR-0006)."""
 
     def test_commits_changed_note_with_edit_message(self, repo_dir):
-        """Commit a changed note with 'edit:' prefix message."""
-        from src.gitnotes.editor import commit_note
+        from src.gitnotes.session import Session, EditResult
 
-        subprocess.run(
-            ["git", "config", "user.email", "test@gitnotes.dev"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "GitNotes Test"],
-            check=True, capture_output=True,
-        )
+        _config_git_user(repo_dir)
 
         note_path = repo_dir / "test-note.md"
         note_path.write_text("initial\n")
         subprocess.run(["git", "add", "."], check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
 
-        note_path.write_text("modified\n")
+        modify_script = repo_dir / "modify_editor.sh"
+        modify_script.write_text("#!/bin/sh\necho 'modified' > \"$1\"\n")
+        modify_script.chmod(0o755)
 
-        commit_note("test-note.md")
+        with Session("test-note.md", repo_dir) as s:
+            s.edit(str(modify_script))
+            s.commit()
 
         result = subprocess.run(
             ["git", "log", "--oneline", "-1"],
@@ -160,27 +234,18 @@ class TestGitCommit:
         )
         assert "edit:" in result.stdout
 
-    def test_does_not_commit_when_file_unchanged(self, repo_dir):
-        """Skip commit when snapshot shows no change after edit."""
-        from src.gitnotes.editor import commit_note
-        from src.gitnotes.snapshot import create_snapshot
+    def test_does_not_commit_unchanged_note(self, repo_dir):
+        from src.gitnotes.session import Session
 
-        subprocess.run(
-            ["git", "config", "user.email", "test@gitnotes.dev"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "GitNotes Test"],
-            check=True, capture_output=True,
-        )
+        _config_git_user(repo_dir)
 
         note_path = repo_dir / "test-note.md"
         note_path.write_text("same\n")
         subprocess.run(["git", "add", "."], check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
 
-        create_snapshot("test-note.md")
-        commit_note("test-note.md")
+        with Session("test-note.md", repo_dir) as s:
+            s.commit()
 
         result = subprocess.run(
             ["git", "log", "--oneline", "-1"],
@@ -190,198 +255,97 @@ class TestGitCommit:
         assert "edit:" not in result.stdout
 
 
-class TestEditorSpawn:
-    """Slice 2b, first behavior: spawn editor and wait for exit."""
-
-    def test_spawns_true_editor_and_returns_zero(self, repo_dir):
-        """Spawn 'true' as mock editor; it exits 0 immediately."""
-        from src.gitnotes.editor import spawn_editor
-
-        note_path = repo_dir / "test-note.md"
-        note_path.write_text("content")
-
-        exit_code = spawn_editor("true", str(note_path))
-        assert exit_code == 0
-
-
-class TestExternalChangeRecovery:
-    """Slice 3: External Change Recovery (ADR-0005)."""
-
-    def test_edit_note_true_editor_no_changes(self, repo_dir):
-        """Full edit cycle with true editor: no commit, lock released."""
-        from src.gitnotes.editor import edit_note
-        from src.gitnotes.session_manager import acquire_lock, release_lock
-
-        note_path = repo_dir / "test-note.md"
-        note_path.write_text("content\n")
-
-        result = edit_note("test-note.md", "true")
-        assert result is False
-
-        acquire_lock("test-note.md")
-        release_lock("test-note.md")
-
-    def test_edit_note_with_change_creates_commit(self, repo_dir):
-        """Edit session where editor changes file: commit created."""
-        from src.gitnotes.editor import edit_note
-
-        subprocess.run(
-            ["git", "config", "user.email", "test@gitnotes.dev"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "GitNotes Test"],
-            check=True, capture_output=True,
-        )
-
-        note_path = repo_dir / "test-note.md"
-        note_path.write_text("original\n")
-        subprocess.run(["git", "add", "."], check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
-
-        result = edit_note("test-note.md", "true")
-        assert result is False
-
-    def test_detects_external_change_before_edit(self, repo_dir):
-        """Pre-edit check detects file modified after snapshot."""
-        from src.gitnotes.snapshot import create_snapshot
-        from src.gitnotes.editor import detect_external_change
-
-        note_path = repo_dir / "test-note.md"
-        note_path.write_text("original\n")
-        create_snapshot("test-note.md")
-
-        note_path.write_text("externally modified\n")
-
-        assert detect_external_change("test-note.md")
-
-    def test_retry_after_external_change_restores_snapshot(self, repo_dir):
-        """Retry option restores snapshot before spawning editor."""
-        from src.gitnotes.editor import edit_note
-
-        subprocess.run(
-            ["git", "config", "user.email", "test@gitnotes.dev"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "GitNotes Test"],
-            check=True, capture_output=True,
-        )
-
-        note_path = repo_dir / "test-note.md"
-        note_path.write_text("original\n")
-        subprocess.run(["git", "add", "."], check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
-
-        calls = []
-
-        def on_detect(name, diff):
-            calls.append(("detected", name))
-            return "retry"
-
-        def inject_external_change():
-            note_path.write_text("externally modified before edit\n")
-
-        result = edit_note(
-            "test-note.md", "true",
-            on_external_change=on_detect,
-            _after_snapshot=inject_external_change,
-        )
-        assert result is False
-        assert note_path.read_text() == "original\n"
-
-
-class TestEdgeCases:
-    """Slice 4: Edge Cases — Empty & Deleted Files (ADR-0012, ADR-0013)."""
+class TestSessionRestore:
+    """restore() for empty and deleted edge cases."""
 
     def test_restores_empty_file_from_snapshot(self, repo_dir):
-        """When editor produces an empty file, restore option works."""
-        from src.gitnotes.editor import edit_note
-
-        subprocess.run(
-            ["git", "config", "user.email", "test@gitnotes.dev"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "GitNotes Test"],
-            check=True, capture_output=True,
-        )
+        from src.gitnotes.session import Session, EditResult
 
         note_path = repo_dir / "test-note.md"
         note_path.write_text("original content\n")
-        subprocess.run(["git", "add", "."], check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
 
         empty_script = repo_dir / "empty_editor.sh"
         empty_script.write_text("#!/bin/sh\n: > \"$1\"\n")
         empty_script.chmod(0o755)
 
-        calls = []
-        def on_empty(name, diff):
-            calls.append(("empty", name))
-            return "restore"
-
-        result = edit_note(
-            "test-note.md", str(empty_script),
-            on_empty=on_empty,
-        )
-        assert result is False
-        assert len(calls) == 1
-        assert note_path.read_text() == "original content\n"
+        with Session("test-note.md", repo_dir) as s:
+            result = s.edit(str(empty_script))
+            assert result == EditResult.EMPTY
+            s.restore()
+            assert note_path.read_text() == "original content\n"
 
     def test_restores_deleted_file_from_snapshot(self, repo_dir):
-        """When file is deleted after edit, restore option works."""
-        from src.gitnotes.editor import edit_note
-
-        subprocess.run(
-            ["git", "config", "user.email", "test@gitnotes.dev"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "GitNotes Test"],
-            check=True, capture_output=True,
-        )
+        from src.gitnotes.session import Session, EditResult
 
         note_path = repo_dir / "test-note.md"
         note_path.write_text("original content\n")
-        subprocess.run(["git", "add", "."], check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
 
         delete_script = repo_dir / "delete_editor.sh"
         delete_script.write_text("#!/bin/sh\nrm \"$1\"\n")
         delete_script.chmod(0o755)
 
-        calls = []
-        def on_deleted(name):
-            calls.append(("deleted", name))
-            return "restore"
+        with Session("test-note.md", repo_dir) as s:
+            result = s.edit(str(delete_script))
+            assert result == EditResult.DELETED
+            s.restore()
+            assert note_path.read_text() == "original content\n"
 
-        result = edit_note(
-            "test-note.md", str(delete_script),
-            on_deleted=on_deleted,
-        )
-        assert result is False
-        assert len(calls) == 1
-        assert note_path.read_text() == "original content\n"
+
+class TestSessionLocking:
+    """Lock contention and lifecycle (ADR-0002)."""
+
+    def test_exclusive_lock_prevents_concurrent_session(self, repo_dir):
+        from src.gitnotes.session import Session
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("content\n")
+
+        session1 = Session("test-note.md", repo_dir)
+
+        with pytest.raises(OSError):
+            Session("test-note.md", repo_dir)
+
+        session1.close()
+
+    def test_lock_can_be_released_and_reacquired(self, repo_dir):
+        from src.gitnotes.session import Session
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("content\n")
+
+        session1 = Session("test-note.md", repo_dir)
+        session1.close()
+
+        session2 = Session("test-note.md", repo_dir)
+        session2.close()
+
+    def test_context_manager_releases_lock(self, repo_dir):
+        from src.gitnotes.session import Session
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("content\n")
+
+        with Session("test-note.md", repo_dir) as s:
+            pass
+
+        with Session("test-note.md", repo_dir) as s:
+            pass
 
 
 class TestExport:
     """Slice 5: Pandoc Export (ADR-0008)."""
 
     def test_preflight_returns_false_when_pandoc_missing(self, repo_dir):
-        """Pre-flight check returns False when pandoc not in PATH."""
-        from src.gitnotes.export import check_pandoc, export_note
+        from src.gitnotes.export import check_pandoc
 
         assert not check_pandoc("nonexistent-pandoc")
 
     def test_preflight_accepts_custom_pandoc_path(self, repo_dir):
-        """Pre-flight check works with a custom pandoc path."""
         from src.gitnotes.export import check_pandoc
 
         assert check_pandoc("true")
 
     def test_export_returns_true_on_success(self, repo_dir):
-        """Export returns True when conversion succeeds."""
         from src.gitnotes.export import export_note
 
         note_path = repo_dir / "test-note.md"
@@ -392,7 +356,6 @@ class TestExport:
         assert export_note("test-note.md", "true") is True
 
     def test_export_returns_false_on_failure(self, repo_dir):
-        """Export returns False when conversion fails."""
         from src.gitnotes.export import export_note
 
         note_path = repo_dir / "test-note.md"
@@ -403,7 +366,6 @@ class TestExport:
         assert export_note("test-note.md", "false") is False
 
     def test_export_skips_when_pandoc_missing(self, repo_dir):
-        """Export returns False when pandoc is unavailable."""
         from src.gitnotes.export import export_note
 
         note_path = repo_dir / "test-note.md"
@@ -416,7 +378,6 @@ class TestSearch:
     """Slice 5: Search Command (ADR-0009)."""
 
     def test_search_returns_empty_when_no_matches(self, repo_dir):
-        """Search with no matches returns empty string."""
         from src.gitnotes.search import search_notes
 
         note_path = repo_dir / "test-note.md"
@@ -428,7 +389,6 @@ class TestSearch:
         assert results == ""
 
     def test_search_finds_matching_content(self, repo_dir):
-        """Search returns matches when content exists."""
         from src.gitnotes.search import search_notes
 
         note_path = repo_dir / "test-note.md"
@@ -441,7 +401,6 @@ class TestSearch:
         assert "hello" in results
 
     def test_search_case_insensitive(self, repo_dir):
-        """Search is case-insensitive."""
         from src.gitnotes.search import search_notes
 
         note_path = repo_dir / "test-note.md"
@@ -451,29 +410,3 @@ class TestSearch:
 
         results = search_notes("hello")
         assert "HELLO" in results
-
-
-class TestSessionLocking:
-    """Slice 2a: Session Locking Protocol (ADR-0002)."""
-
-    def test_exclusive_lock_prevents_concurrent_acquire(self, repo_dir):
-        """Acquiring a lock on an already-locked name should fail."""
-        from src.gitnotes.session_manager import acquire_lock, release_lock
-
-        lock1 = acquire_lock("test-note.md")
-
-        import pytest
-        with pytest.raises(Exception):
-            acquire_lock("test-note.md")
-
-        release_lock("test-note.md")
-
-    def test_lock_can_be_released_and_reacquired(self, repo_dir):
-        """After release, the same lock can be acquired again."""
-        from src.gitnotes.session_manager import acquire_lock, release_lock
-
-        acquire_lock("test-note.md")
-        release_lock("test-note.md")
-
-        acquire_lock("test-note.md")
-        release_lock("test-note.md")
