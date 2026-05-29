@@ -58,6 +58,94 @@ def validate_note(file_path: str) -> bool:
         return False
 
 
+def detect_external_change(name: str) -> bool:
+    """
+    Check whether the note file was modified externally since the snapshot.
+
+    Args:
+        name: The note name (e.g., "my-note.md")
+
+    Returns:
+        True if the file differs from its snapshot (external change detected)
+    """
+    from .snapshot import snapshot_changed
+    return snapshot_changed(name)
+
+
+def edit_note(
+    name: str,
+    editor_cmd: str,
+    on_external_change: callable = None,
+    _after_snapshot: callable = None,
+) -> bool:
+    """
+    Full editing session lifecycle with external change detection.
+
+    Per ADR-0005:
+    1. Acquire session lock
+    2. Create pre-edit snapshot
+    3. Check for external changes (pre-edit)
+    4. Spawn editor and wait
+    5. Validate post-edit file
+    6. Compare hashes, show diff if changed
+    7. Commit if user accepts, or revert
+
+    Args:
+        name: The note name (e.g., "my-note.md")
+        editor_cmd: The editor command to spawn
+        on_external_change: Callback invoked when external change detected.
+            Receives (name, diff). Returns "accept", "retry", or "abort".
+
+    Returns:
+        True if changes were committed, False otherwise
+    """
+    from .session_manager import acquire_lock, release_lock
+    from .snapshot import create_snapshot, snapshot_changed
+
+    acquire_lock(name)
+    try:
+        create_snapshot(name)
+
+        if _after_snapshot:
+            _after_snapshot()
+
+        if detect_external_change(name):
+            if on_external_change:
+                diff = get_diff(name)
+                action = on_external_change(name, diff)
+                if action == "retry":
+                    _restore_snapshot(name)
+                elif action == "accept":
+                    pass
+                else:
+                    return False
+            else:
+                return False
+
+        spawn_editor(editor_cmd, str(Path.cwd() / name))
+
+        if not validate_note(str(Path.cwd() / name)):
+            return False
+
+        if not snapshot_changed(name):
+            return False
+
+        commit_note(name)
+        return True
+    finally:
+        release_lock(name)
+
+
+def _restore_snapshot(name: str) -> None:
+    """Restore note content from its pre-edit snapshot."""
+    repo_path = Path.cwd()
+    sessions_dir = repo_path / ".gitnotes" / "sessions"
+    snapshot_path = sessions_dir / f"{name}.pre-edit"
+    note_path = repo_path / name
+    if snapshot_path.exists():
+        note_path.write_bytes(snapshot_path.read_bytes())
+
+
 def commit_note(name: str) -> bool:
     """
     Commit a note file to Git if it has changed since the snapshot.

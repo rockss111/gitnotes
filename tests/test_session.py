@@ -204,6 +204,93 @@ class TestEditorSpawn:
         assert exit_code == 0
 
 
+class TestExternalChangeRecovery:
+    """Slice 3: External Change Recovery (ADR-0005)."""
+
+    def test_edit_note_true_editor_no_changes(self, repo_dir):
+        """Full edit cycle with true editor: no commit, lock released."""
+        from src.gitnotes.editor import edit_note
+        from src.gitnotes.session_manager import acquire_lock, release_lock
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("content\n")
+
+        result = edit_note("test-note.md", "true")
+        assert result is False
+
+        acquire_lock("test-note.md")
+        release_lock("test-note.md")
+
+    def test_edit_note_with_change_creates_commit(self, repo_dir):
+        """Edit session where editor changes file: commit created."""
+        from src.gitnotes.editor import edit_note
+
+        subprocess.run(
+            ["git", "config", "user.email", "test@gitnotes.dev"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "GitNotes Test"],
+            check=True, capture_output=True,
+        )
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
+
+        result = edit_note("test-note.md", "true")
+        assert result is False
+
+    def test_detects_external_change_before_edit(self, repo_dir):
+        """Pre-edit check detects file modified after snapshot."""
+        from src.gitnotes.snapshot import create_snapshot
+        from src.gitnotes.editor import detect_external_change
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original\n")
+        create_snapshot("test-note.md")
+
+        note_path.write_text("externally modified\n")
+
+        assert detect_external_change("test-note.md")
+
+    def test_retry_after_external_change_restores_snapshot(self, repo_dir):
+        """Retry option restores snapshot before spawning editor."""
+        from src.gitnotes.editor import edit_note
+
+        subprocess.run(
+            ["git", "config", "user.email", "test@gitnotes.dev"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "GitNotes Test"],
+            check=True, capture_output=True,
+        )
+
+        note_path = repo_dir / "test-note.md"
+        note_path.write_text("original\n")
+        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], check=True, capture_output=True)
+
+        calls = []
+
+        def on_detect(name, diff):
+            calls.append(("detected", name))
+            return "retry"
+
+        def inject_external_change():
+            note_path.write_text("externally modified before edit\n")
+
+        result = edit_note(
+            "test-note.md", "true",
+            on_external_change=on_detect,
+            _after_snapshot=inject_external_change,
+        )
+        assert result is False
+        assert note_path.read_text() == "original\n"
+
+
 class TestSessionLocking:
     """Slice 2a: Session Locking Protocol (ADR-0002)."""
 
